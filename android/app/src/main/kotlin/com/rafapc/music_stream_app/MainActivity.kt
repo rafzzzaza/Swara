@@ -1,0 +1,5 @@
+package com.rafapc.music_stream_app
+
+import com.ryanheise.audioservice.AudioServiceActivity
+
+class MainActivity : AudioServiceActivity()

@@ -1,0 +1,382 @@
+import 'dart:async';
+
+import 'package:audio_service/audio_service.dart';
+import 'package:flutter/foundation.dart';
+import 'package:just_audio/just_audio.dart';
+
+import '../models/song.dart';
+import '../services/music_api_service.dart';
+import '../services/youtube_audio_service.dart';
+
+class PlayerProvider extends ChangeNotifier {
+  final MusicApiService _api;
+  final YoutubeAudioService _yt;
+
+  late final AudioPlayer _player;
+
+  List<Song> _queue = [];
+  int? _currentIndex;
+
+  List<Song> _recommendations = [];
+  bool _recommendationsLoading = false;
+  bool _fetchingRecs = false;
+  bool _appendingRecs = false;
+
+  bool _autoQueue = false;
+
+  static const _userAgent =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+      '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+  PlayerProvider(this._api, this._yt) {
+    _player = AudioPlayer();
+
+    _player.currentIndexStream.listen((index) {
+      if (index != null && index != _currentIndex) {
+        _currentIndex = index;
+        notifyListeners();
+        if (_autoQueue) _maybeAutoAppend();
+      }
+    });
+
+    _player.processingStateStream.listen((state) {
+      if (state == ProcessingState.completed) notifyListeners();
+    });
+
+    _player.playbackEventStream.listen((event) {
+      if (event.currentIndex != null) {
+        final idx = event.currentIndex!;
+        if (idx != _currentIndex) {
+          _currentIndex = idx;
+          notifyListeners();
+          if (_autoQueue) _maybeAutoAppend();
+        }
+      }
+    });
+  }
+
+  AudioPlayer get audioPlayer => _player;
+  List<Song> get queue => _queue;
+  bool get autoQueueEnabled => _autoQueue;
+  List<Song> get recommendations => _recommendations;
+  bool get recommendationsLoading => _recommendationsLoading;
+
+  Song? get currentSong =>
+      (_currentIndex != null && _currentIndex! >= 0 &&
+              _currentIndex! < _queue.length)
+          ? _queue[_currentIndex!]
+          : null;
+
+  List<Song> get upcoming {
+    final ci = _currentIndex ?? 0;
+    if (ci < 0 || ci >= _queue.length) return const [];
+    return _queue.sublist(ci + 1);
+  }
+
+  int? get currentIndex => _currentIndex;
+  bool get hasAny => _queue.isNotEmpty;
+  bool get isPlaying => _player.playing;
+  Stream<Duration> get positionStream => _player.positionStream;
+  Stream<Duration?> get durationStream => _player.durationStream;
+  Stream<ProcessingState> get processingStateStream =>
+      _player.processingStateStream;
+  Stream<bool> get playingStream => _player.playingStream;
+  Stream<int?> get currentIndexStream => _player.currentIndexStream;
+  bool get shuffleModeEnabled => _player.shuffleModeEnabled;
+  LoopMode get loopMode => _player.loopMode;
+  double get volume => _player.volume;
+
+  /// Builds the audio source for [song].
+  ///
+  /// Priority: local file (full) -> full-length YouTube stream -> Deezer
+  /// 30s preview. [cachedOnly] makes the YouTube lookup non-blocking by
+  /// only consulting the in-memory resolution cache.
+  Future<AudioSource?> _sourceFor(Song song, {bool cachedOnly = false}) async {
+    final mediaItem = _toMediaItem(song);
+
+    if (song.isLocal && song.localPath != null) {
+      return AudioSource.uri(Uri.file(song.localPath!), tag: mediaItem);
+    }
+
+    final ytUrl = await _yt.resolve(song, cachedOnly: cachedOnly);
+    if (ytUrl != null) {
+      return AudioSource.uri(
+        Uri.parse(ytUrl),
+        tag: mediaItem,
+        headers: const {
+          'User-Agent': _userAgent,
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+      );
+    }
+
+    final uri = Uri.tryParse(song.previewUrl ?? '');
+    if (uri == null || !uri.hasScheme) return null;
+    return AudioSource.uri(uri, tag: mediaItem);
+  }
+
+  Future<void> playQueue(List<Song> songs, {int index = 0}) async {
+    if (songs.isEmpty) return;
+    notifyListeners();
+
+    final children = <AudioSource>[];
+    final resolvedSongs = <Song>[];
+    for (var i = 0; i < songs.length; i++) {
+      final song = songs[i];
+      // Resolve the tapped song fully; the rest fall back to cached/preview
+      // so queue building stays fast.
+      final source = await _sourceFor(song, cachedOnly: i != index);
+      if (source == null) continue;
+      resolvedSongs.add(song);
+      children.add(source);
+      if (i == index) index = resolvedSongs.length - 1;
+    }
+    if (children.isEmpty) {
+      notifyListeners();
+      return;
+    }
+
+    _queue = List.of(resolvedSongs);
+    index = index.clamp(0, _queue.length - 1);
+
+    try {
+      await _player.stop();
+      await _player.setAudioSources(children, initialIndex: index);
+      _currentIndex = index;
+      await _player.play();
+    } catch (_) {}
+    notifyListeners();
+
+    unawaited(loadRecommendations());
+    if (_autoQueue) _maybeAutoAppend();
+  }
+
+  Future<void> playSong(Song song) async {
+    if (song.isLocal && song.localPath != null) {
+      await _playLocal(song);
+      return;
+    }
+    final existing = _queue.indexWhere((s) => s.id == song.id);
+    if (existing == _currentIndex && _currentIndex != null) {
+      await resume();
+      notifyListeners();
+      return;
+    }
+    if (existing >= 0) {
+      await _player.seek(Duration.zero, index: existing);
+      _currentIndex = existing;
+      await _player.play();
+      notifyListeners();
+      return;
+    }
+    await playQueue([song], index: 0);
+  }
+
+  Future<void> _playLocal(Song song) async {
+    if (song.localPath == null) return;
+    await _player.stop();
+    try {
+      await _player.setAudioSource(
+        AudioSource.uri(Uri.file(song.localPath!), tag: _toMediaItem(song)),
+      );
+      _queue = [song];
+      _currentIndex = 0;
+      await _player.play();
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  Future<void> insertNext(Song song) async {
+    if (_queue.isEmpty) {
+      await playQueue([song], index: 0);
+      return;
+    }
+    final source = await _sourceFor(song, cachedOnly: true);
+    if (source == null) return;
+    final insertAt = (_currentIndex ?? 0).clamp(0, _queue.length);
+    try {
+      await _player.insertAudioSource(insertAt + 1, source);
+      _queue.insert(insertAt + 1, song);
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  Future<void> addToQueue(Song song) async {
+    if (_queue.isEmpty) {
+      await playQueue([song], index: 0);
+      return;
+    }
+    final source = await _sourceFor(song, cachedOnly: true);
+    if (source == null) return;
+    try {
+      await _player.addAudioSources([source]);
+      _queue.add(song);
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  Future<void> skipTo(int index) async {
+    if (index < 0 || index >= _queue.length) return;
+    await _player.seek(Duration.zero, index: index);
+    _currentIndex = index;
+    notifyListeners();
+  }
+
+  Future<void> loadRecommendations({int limit = 10}) async {
+    final base = currentSong;
+    if (base == null || _fetchingRecs) return;
+    _fetchingRecs = true;
+    _recommendationsLoading = true;
+    notifyListeners();
+
+    final seen = <String>{
+      for (final s in _queue) s.id,
+      for (final s in _recommendations) s.id,
+    };
+
+    var results = <Song>[];
+    try {
+      final query =
+          base.artist.isNotEmpty ? base.artist : base.title.trim();
+      results = await _api.searchSongs(query, limit: 24);
+      if (results.length < 3 && base.artist.isNotEmpty) {
+        results = await _api.searchSongs('${base.artist} hits', limit: 24);
+      }
+    } catch (_) {
+      results = [];
+    }
+
+    _recommendations = results
+        .where((s) => !seen.contains(s.id))
+        .take(limit)
+        .toList();
+
+    _fetchingRecs = false;
+    _recommendationsLoading = false;
+    notifyListeners();
+  }
+
+  Future<void> _appendRecommendationsToQueue() async {
+    if (_appendingRecs || _queue.isEmpty) return;
+    _appendingRecs = true;
+    try {
+      if (_recommendations.isEmpty) {
+        await loadRecommendations();
+      }
+      if (_recommendations.isEmpty) return;
+      final used = <String>{for (final s in _queue) s.id};
+      final pick =
+          _recommendations.where((s) => !used.contains(s.id)).take(8).toList();
+      if (pick.isNotEmpty) {
+        final sources = <AudioSource>[];
+        for (final s in pick) {
+          final src = await _sourceFor(s, cachedOnly: true);
+          if (src != null) sources.add(src);
+        }
+        if (sources.isNotEmpty) {
+          await _player.addAudioSources(sources);
+          _queue.addAll(pick);
+          notifyListeners();
+        }
+      }
+    } catch (_) {}
+    _appendingRecs = false;
+  }
+
+  Future<void> _maybeAutoAppend() async {
+    if (!_autoQueue) return;
+    final ci = _currentIndex;
+    if (ci == null || _queue.isEmpty) return;
+    if (_queue.length - ci - 1 <= 2) {
+      await _appendRecommendationsToQueue();
+    }
+  }
+
+  Future<void> setAutoQueue(bool value) async {
+    _autoQueue = value;
+    notifyListeners();
+    if (value) {
+      if (_recommendations.isEmpty) unawaited(loadRecommendations());
+      unawaited(_maybeAutoAppend());
+    }
+  }
+
+  Future<void> togglePlayPause() async {
+    if (_player.playing) {
+      await pause();
+    } else {
+      await resume();
+    }
+  }
+
+  Future<void> resume() async {
+    if (_queue.isEmpty) return;
+    await _player.play();
+    notifyListeners();
+  }
+
+  Future<void> pause() async {
+    await _player.pause();
+    notifyListeners();
+  }
+
+  Future<void> seek(Duration position) async {
+    await _player.seek(position);
+    notifyListeners();
+  }
+
+  Future<void> next() async {
+    _player
+        .seek(Duration.zero, index: (_currentIndex ?? 0) + 1)
+        .catchError((_) {});
+    notifyListeners();
+  }
+
+  Future<void> previous() async {
+    final position = _player.position;
+    if (position > const Duration(seconds: 3)) {
+      await _player.seek(Duration.zero);
+      notifyListeners();
+      return;
+    }
+    _player.seek(Duration.zero, index: ((_currentIndex ?? 1) - 1).clamp(0, 1 << 30));
+    notifyListeners();
+  }
+
+  Future<void> toggleShuffle() async {
+    await _player.setShuffleModeEnabled(!_player.shuffleModeEnabled);
+    notifyListeners();
+  }
+
+  Future<void> cycleLoopMode() async {
+    final modes = [LoopMode.off, LoopMode.all, LoopMode.one];
+    final current = modes.indexOf(_player.loopMode);
+    await _player.setLoopMode(modes[(current + 1) % modes.length]);
+    notifyListeners();
+  }
+
+  Future<void> setVolume(double volume) async {
+    await _player.setVolume(volume);
+    notifyListeners();
+  }
+
+  MediaItem _toMediaItem(Song song) => MediaItem(
+        id: song.id,
+        title: song.title,
+        artist: song.artist,
+        album: song.album?.isNotEmpty == true ? song.album! : 'Swara',
+        duration: song.duration,
+        artUri: song.artUrl != null
+            ? Uri.tryParse(song.artUrl!)
+            : (song.thumbnailUrl != null
+                ? Uri.tryParse(song.thumbnailUrl!)
+                : null),
+      );
+
+  @override
+  void dispose() {
+    _player.dispose();
+    _yt.dispose();
+    super.dispose();
+  }
+}
