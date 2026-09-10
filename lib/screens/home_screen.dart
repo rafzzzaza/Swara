@@ -60,9 +60,17 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Baca inset keyboard dari atas Scaffold (Scaffold menghapusnya untuk
+    // bottomNavigationBar), lalu dorong mini player + nav naik lewat keyboard
+    // supaya tidak tertutup saat mengetik di Cari.
+    final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
     return Scaffold(
       body: IndexedStack(index: _tab, children: _tabs),
-      bottomNavigationBar: Column(
+      bottomNavigationBar: AnimatedPadding(
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+        padding: EdgeInsets.only(bottom: keyboardInset),
+        child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           MiniPlayer(onOpen: _openPlayer),
@@ -106,6 +114,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
         ],
+        ),
       ),
     );
   }

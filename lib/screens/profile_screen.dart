@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../main.dart';
+import '../providers/auth_provider.dart';
 import '../providers/history_provider.dart';
 import '../providers/playlist_provider.dart';
 import '../providers/profile_provider.dart';
@@ -225,12 +226,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   Future<void> _logout(BuildContext context) async {
+    final auth = context.read<AuthProvider>();
+    final isAccount = auth.loggedIn;
     final ok = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('Keluar?'),
-        content: const Text(
-            'Swara berjalan tanpa login (mode lokal). Data di perangkat tidak dihapus.'),
+        title: Text(isAccount ? 'Keluar dari akun?' : 'Keluar?'),
+        content: Text(isAccount
+            ? 'Sesi ${auth.user?.email} akan diakhiri dari perangkat ini.'
+            : 'Swara berjalan tanpa login (mode tamu). Data favorit di perangkat tidak dihapus.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, false),
@@ -244,6 +248,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
       ),
     );
     if (ok == true && context.mounted) {
+      await context.read<AuthProvider>().logout();
+      if (!context.mounted) return;
+      Navigator.of(context).popUntil((route) => route.isFirst);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Berhasil keluar.')),
       );

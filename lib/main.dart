@@ -7,6 +7,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'providers/auth_provider.dart';
 import 'providers/download_provider.dart';
 import 'providers/history_provider.dart';
 import 'providers/home_provider.dart';
@@ -14,7 +15,9 @@ import 'providers/player_provider.dart';
 import 'providers/playlist_provider.dart';
 import 'providers/profile_provider.dart';
 import 'providers/search_provider.dart';
+import 'screens/auth_screen.dart';
 import 'screens/home_screen.dart';
+import 'services/auth_service.dart';
 import 'services/cloud_service.dart';
 import 'services/database_service.dart';
 import 'services/download_service.dart';
@@ -45,12 +48,16 @@ Future<void> main() async {
     notificationColor: kSwaraGold,
   );
 
+  // Login online Supabase (no-op bila kredensial tidak diberikan).
+  await AuthService.initialize();
+
   final api = MusicApiService();
   final database = DatabaseService();
   final youtube = YoutubeAudioService();
   final prefs = await SharedPreferences.getInstance();
   final rec = RecommendationService(prefs);
   final cloud = CloudService();
+  final auth = AuthProvider(AuthService());
   final deviceId = _ensureDeviceId(prefs);
   final historyService = HistoryService(database, cloud, deviceId);
 
@@ -63,6 +70,7 @@ Future<void> main() async {
     prefs: prefs,
     deviceId: deviceId,
     historyService: historyService,
+    authProvider: auth,
   ));
 }
 
@@ -85,6 +93,7 @@ class SwaraApp extends StatelessWidget {
   final SharedPreferences prefs;
   final String deviceId;
   final HistoryService historyService;
+  final AuthProvider authProvider;
 
   const SwaraApp({
     super.key,
@@ -96,12 +105,14 @@ class SwaraApp extends StatelessWidget {
     required this.prefs,
     required this.deviceId,
     required this.historyService,
+    required this.authProvider,
   });
 
   @override
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
+        ChangeNotifierProvider<AuthProvider>.value(value: authProvider),
         ChangeNotifierProvider(
             create: (_) => PlayerProvider(api, youtube, rec, historyService)),
         ChangeNotifierProvider(create: (_) => HomeProvider(api, rec)),
@@ -120,7 +131,7 @@ class SwaraApp extends StatelessWidget {
         title: 'Swara',
         debugShowCheckedModeBanner: false,
         theme: _buildTheme(),
-        home: const HomeScreen(),
+        home: const SwaraRoot(),
       ),
     );
   }
@@ -168,5 +179,39 @@ class SwaraApp extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+/// Gerbang masuk aplikasi: layar login online bila diperlukan,
+/// sebaliknya langsung ke Beranda (mode tamu / sudah login).
+class SwaraRoot extends StatefulWidget {
+  const SwaraRoot({super.key});
+
+  @override
+  State<SwaraRoot> createState() => _SwaraRootState();
+}
+
+class _SwaraRootState extends State<SwaraRoot> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      context.read<AuthProvider>().load();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final auth = context.watch<AuthProvider>();
+    if (!auth.initialized) {
+      return const Scaffold(
+        backgroundColor: kSwaraBg,
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+    if (auth.onlineEnabled && !auth.isGuest && auth.user == null) {
+      return const AuthScreen();
+    }
+    return const HomeScreen();
   }
 }

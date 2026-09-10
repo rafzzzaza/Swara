@@ -19,7 +19,9 @@ class PlayerProvider extends ChangeNotifier {
   late final AudioPlayer _player;
 
   List<Song> _queue = [];
+  List<AudioSource> _children = [];
   int? _currentIndex;
+  int _generation = 0;
 
   List<Song> _recommendations = [];
   bool _recommendationsLoading = false;
@@ -27,6 +29,10 @@ class PlayerProvider extends ChangeNotifier {
   bool _appendingRecs = false;
 
   bool _autoQueue = false;
+
+  /// Berapa sumber audio YouTube yang boleh di-resolve bersamaan.
+  /// Concurrency terbatas mencegah lonjakan request yang bikin lag.
+  static const _satelliteConcurrency = 3;
 
   static const _userAgent =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -90,6 +96,27 @@ class PlayerProvider extends ChangeNotifier {
   LoopMode get loopMode => _player.loopMode;
   double get volume => _player.volume;
 
+  /// Jalankan [tasks] dengan maksimal [concurrency] task paralel.
+  Future<void> _runWithConcurrency(
+    int count,
+    int concurrency,
+    Future<void> Function(int i) task,
+  ) async {
+    var next = 0;
+    Future<void> worker() async {
+      while (true) {
+        final i = next++;
+        if (i >= count) return;
+        await task(i);
+      }
+    }
+
+    final workers = <Future<void>>[
+      for (var w = 0; w < concurrency && w < count; w++) worker(),
+    ];
+    await Future.wait(workers);
+  }
+
   /// Builds the audio source for [song].
   ///
   /// Priority: local file (full) -> full-length YouTube stream -> Deezer
@@ -123,16 +150,37 @@ class PlayerProvider extends ChangeNotifier {
     if (songs.isEmpty) return;
     notifyListeners();
 
+    // 1) Lagu yang di-tap di-resolve penuh dulu (langsung muter full).
+    final primarySource = await _sourceFor(songs[index]);
+    if (primarySource == null) {
+      notifyListeners();
+      return;
+    }
+
+    // 2) Sisa queue di-resolve dari cache (cepat) agar build tidak nge-blok.
+    final satIdx = <int>[];
+    for (var i = 0; i < songs.length; i++) {
+      if (i != index) satIdx.add(i);
+    }
+    final satFutures = <Future<AudioSource?>>[
+      for (final i in satIdx) _sourceFor(songs[i], cachedOnly: true),
+    ];
+    final satResults = await Future.wait(satFutures);
+
+    // 3) Rakit ulang urutan asli.
     final children = <AudioSource>[];
     final resolvedSongs = <Song>[];
+    var satK = 0;
     for (var i = 0; i < songs.length; i++) {
-      final song = songs[i];
-      // Resolve the tapped song fully; the rest fall back to cached/preview
-      // so queue building stays fast.
-      final source = await _sourceFor(song, cachedOnly: i != index);
-      if (source == null) continue;
-      resolvedSongs.add(song);
-      children.add(source);
+      AudioSource? src;
+      if (i == index) {
+        src = primarySource;
+      } else {
+        src = satResults[satK++];
+      }
+      if (src == null) continue;
+      resolvedSongs.add(songs[i]);
+      children.add(src);
       if (i == index) index = resolvedSongs.length - 1;
     }
     if (children.isEmpty) {
@@ -141,11 +189,13 @@ class PlayerProvider extends ChangeNotifier {
     }
 
     _queue = List.of(resolvedSongs);
+    _children = children;
     index = index.clamp(0, _queue.length - 1);
+    final gen = ++_generation;
 
     try {
       await _player.stop();
-      await _player.setAudioSources(children, initialIndex: index);
+      await _player.setAudioSources(_children, initialIndex: index);
       _currentIndex = index;
       await _player.play();
     } catch (_) {}
@@ -154,6 +204,10 @@ class PlayerProvider extends ChangeNotifier {
     _recordActivity(resolvedSongs[index]);
     unawaited(loadRecommendations());
     if (_autoQueue) _maybeAutoAppend();
+
+    // 4) Upgrade seluruh queue ke full-length YouTube di background,
+    //    tanpa memblokir pemutaran.
+    unawaited(_upgradeQueueFull(gen, _queue.length));
   }
 
   /// Mencatat aktivitas pemutaran lokal (rekomendasi + riwayat).
@@ -161,6 +215,28 @@ class PlayerProvider extends ChangeNotifier {
     try {
       await _rec.recordPlay(song.artist, genre: song.genre);
       await _history.record(song);
+    } catch (_) {}
+  }
+
+  /// Upgrade semua indeks queue menjadi full-length (bukan preview 30 detik).
+  Future<void> _upgradeQueueFull(int gen, int length) async {
+    await _runWithConcurrency(length, _satelliteConcurrency, (i) async {
+      await _upgradeIndex(gen, i);
+    });
+  }
+
+  Future<void> _upgradeIndex(int gen, int i) async {
+    if (i < 0 || i >= _queue.length || i >= _children.length) return;
+    final song = _queue[i];
+    if (song.isLocal && song.localPath != null) return;
+    final full = await _sourceFor(song);
+    if (full == null) return;
+    if (gen != _generation) return;
+    if (i >= _children.length || identical(_children[i], full)) return;
+    _children[i] = full;
+    try {
+      final ci = (_currentIndex ?? 0).clamp(0, _children.length - 1);
+      await _player.setAudioSources(_children, initialIndex: ci);
     } catch (_) {}
   }
 
@@ -190,9 +266,12 @@ class PlayerProvider extends ChangeNotifier {
     if (song.localPath == null) return;
     await _player.stop();
     try {
-      await _player.setAudioSource(
-        AudioSource.uri(Uri.file(song.localPath!), tag: _toMediaItem(song)),
+      final src = AudioSource.uri(
+        Uri.file(song.localPath!),
+        tag: _toMediaItem(song),
       );
+      _children = [src];
+      await _player.setAudioSource(src);
       _queue = [song];
       _currentIndex = 0;
       await _player.play();
@@ -206,14 +285,19 @@ class PlayerProvider extends ChangeNotifier {
       await playQueue([song], index: 0);
       return;
     }
+    final gen = ++_generation;
     final source = await _sourceFor(song, cachedOnly: true);
     if (source == null) return;
     final insertAt = (_currentIndex ?? 0).clamp(0, _queue.length);
     try {
       await _player.insertAudioSource(insertAt + 1, source);
+      _children.insert(insertAt + 1, source);
       _queue.insert(insertAt + 1, song);
-    } catch (_) {}
+    } catch (_) {
+      return;
+    }
     notifyListeners();
+    unawaited(_upgradeIndex(gen, insertAt + 1));
   }
 
   Future<void> addToQueue(Song song) async {
@@ -221,13 +305,18 @@ class PlayerProvider extends ChangeNotifier {
       await playQueue([song], index: 0);
       return;
     }
+    final gen = ++_generation;
     final source = await _sourceFor(song, cachedOnly: true);
     if (source == null) return;
     try {
       await _player.addAudioSources([source]);
+      _children.add(source);
       _queue.add(song);
-    } catch (_) {}
+    } catch (_) {
+      return;
+    }
     notifyListeners();
+    unawaited(_upgradeIndex(gen, _children.length - 1));
   }
 
   Future<void> skipTo(int index) async {
@@ -283,6 +372,7 @@ class PlayerProvider extends ChangeNotifier {
       final pick =
           _recommendations.where((s) => !used.contains(s.id)).take(8).toList();
       if (pick.isNotEmpty) {
+        final gen = ++_generation;
         final sources = <AudioSource>[];
         for (final s in pick) {
           final src = await _sourceFor(s, cachedOnly: true);
@@ -290,8 +380,17 @@ class PlayerProvider extends ChangeNotifier {
         }
         if (sources.isNotEmpty) {
           await _player.addAudioSources(sources);
+          _children.addAll(sources);
           _queue.addAll(pick);
           notifyListeners();
+          unawaited(_runWithConcurrency(
+            sources.length,
+            _satelliteConcurrency,
+            (k) async {
+              final i = _children.length - sources.length + k;
+              await _upgradeIndex(gen, i);
+            },
+          ));
         }
       }
     } catch (_) {}
@@ -354,7 +453,8 @@ class PlayerProvider extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    _player.seek(Duration.zero, index: ((_currentIndex ?? 1) - 1).clamp(0, 1 << 30));
+    _player
+        .seek(Duration.zero, index: ((_currentIndex ?? 1) - 1).clamp(0, 1 << 30));
     notifyListeners();
   }
 

@@ -4,6 +4,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:music_stream_app/models/play_history_entry.dart';
 import 'package:music_stream_app/models/song.dart';
 import 'package:music_stream_app/models/user_profile.dart';
+import 'package:music_stream_app/providers/auth_provider.dart';
+import 'package:music_stream_app/services/auth_service.dart';
 import 'package:music_stream_app/services/cloud_service.dart';
 import 'package:music_stream_app/services/recommendation_service.dart';
 import 'package:music_stream_app/utils/time_ago.dart';
@@ -147,6 +149,27 @@ void main() {
       await cloud.upsertProfile(profile.copyWith(avatarKey: 'headphones'));
       final history = await cloud.fetchHistory('u1');
       expect(history, isEmpty);
+    });
+  });
+
+  group('AuthService & AuthProvider (mode offline)', () {
+    test('tanpa dart-define: online disabled, currentUser null, signOut no-op',
+        () async {
+      expect(AuthService.enabled, false);
+      final service = AuthService();
+      expect(await service.currentUser(), isNull);
+      await service.signOut();
+    });
+
+    test('load tanpa konfigurasi → langsung jadi guest (aplikasi tetap jalan)',
+        () async {
+      final provider = AuthProvider(AuthService());
+      await provider.load();
+      expect(provider.initialized, true);
+      expect(provider.isGuest, true);
+      expect(provider.loggedIn, false);
+      provider.continueAsGuest();
+      expect(provider.initialized, true);
     });
   });
 

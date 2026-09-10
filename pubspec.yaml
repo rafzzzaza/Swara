@@ -48,8 +48,7 @@ dependencies:
   http: ^1.6.0
   palette_generator: ^0.3.3+7
   shared_preferences: ^2.5.5
-  supabase: ^2.16.1
-
+  supabase_flutter: ^2.17.2
 dev_dependencies:
   flutter_test:
     sdk: flutter

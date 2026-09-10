@@ -1,14 +1,15 @@
-import 'package:supabase/supabase.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../models/play_history_entry.dart';
 import '../models/user_profile.dart';
 
-/// Lapisan cloud berbasis Supabase (Postgres + Auth) — mode local-first.
+/// Lapisan cloud berbasis Supabase (Postgres + Auth) — data user & sinkronisasi
+/// riwayat/profil tersimpan di cloud saat login online tersedia.
 ///
 /// Aktif HANYA bila kredensial diberikan saat build:
 ///   flutter build apk --dart-define=SUPABASE_URL=... --dart-define=SUPABASE_ANON_KEY=...
 /// Tanpa kredensial, [enabled] bernilai false dan seluruh metode menjadi no-op,
-/// sehingga aplikasi tetap berjalan penuh secara lokal.
+/// sehingga aplikasi tetap berjalan penuh secara lokal (mode tamu).
 class CloudService {
   static const _url = String.fromEnvironment('SUPABASE_URL', defaultValue: '');
   static const _anonKey =
@@ -17,23 +18,22 @@ class CloudService {
   static const _usersTable = 'users';
   static const _historyTable = 'play_history';
 
-  SupabaseClient? _client;
-
   /// True bila kredensial Supabase tersedia di build ini.
   bool get enabled => _url.isNotEmpty && _anonKey.isNotEmpty;
 
+  /// Klien Supabase terautentikasi (sesi login bila ada).
   SupabaseClient? get client {
     if (!enabled) return null;
-    return _client ??= SupabaseClient(_url, _anonKey);
+    return Supabase.instance.client;
   }
 
-  /// Menyimpan profil ke tabel `users` (upsert by user_id).
+  /// Menyimpan profil ke tabel `users` (upsert by id = auth user id).
   Future<void> upsertProfile(UserProfile profile) async {
     final c = client;
     if (c == null) return;
     try {
       await c.from(_usersTable).upsert({
-        'user_id': profile.id,
+        'id': profile.id,
         'display_name': profile.displayName,
         'bio': profile.bio,
         'email': profile.email,
