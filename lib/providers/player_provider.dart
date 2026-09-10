@@ -5,12 +5,16 @@ import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 
 import '../models/song.dart';
+import '../services/history_service.dart';
 import '../services/music_api_service.dart';
+import '../services/recommendation_service.dart';
 import '../services/youtube_audio_service.dart';
 
 class PlayerProvider extends ChangeNotifier {
   final MusicApiService _api;
   final YoutubeAudioService _yt;
+  final RecommendationService _rec;
+  final HistoryService _history;
 
   late final AudioPlayer _player;
 
@@ -28,7 +32,7 @@ class PlayerProvider extends ChangeNotifier {
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-  PlayerProvider(this._api, this._yt) {
+  PlayerProvider(this._api, this._yt, this._rec, this._history) {
     _player = AudioPlayer();
 
     _player.currentIndexStream.listen((index) {
@@ -147,8 +151,17 @@ class PlayerProvider extends ChangeNotifier {
     } catch (_) {}
     notifyListeners();
 
+    _recordActivity(resolvedSongs[index]);
     unawaited(loadRecommendations());
     if (_autoQueue) _maybeAutoAppend();
+  }
+
+  /// Mencatat aktivitas pemutaran lokal (rekomendasi + riwayat).
+  Future<void> _recordActivity(Song song) async {
+    try {
+      await _rec.recordPlay(song.artist, genre: song.genre);
+      await _history.record(song);
+    } catch (_) {}
   }
 
   Future<void> playSong(Song song) async {
@@ -167,6 +180,7 @@ class PlayerProvider extends ChangeNotifier {
       _currentIndex = existing;
       await _player.play();
       notifyListeners();
+      unawaited(_recordActivity(song));
       return;
     }
     await playQueue([song], index: 0);
@@ -184,6 +198,7 @@ class PlayerProvider extends ChangeNotifier {
       await _player.play();
     } catch (_) {}
     notifyListeners();
+    unawaited(_recordActivity(song));
   }
 
   Future<void> insertNext(Song song) async {

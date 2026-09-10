@@ -4,12 +4,13 @@ import 'package:path/path.dart';
 import 'package:sqflite/sqflite.dart';
 
 import '../models/download_record.dart';
+import '../models/play_history_entry.dart';
 import '../models/playlist.dart';
 import '../models/song.dart';
 
 class DatabaseService {
   static const _dbName = 'musik_app.db';
-  static const _dbVersion = 1;
+  static const _dbVersion = 2;
 
   Database? _db;
 
@@ -20,8 +21,27 @@ class DatabaseService {
       path,
       version: _dbVersion,
       onCreate: _onCreate,
+      onUpgrade: _onUpgrade,
     );
     return _db!;
+  }
+
+  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      await db.execute('''
+        CREATE TABLE play_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          song_id TEXT NOT NULL,
+          title TEXT NOT NULL,
+          artist TEXT NOT NULL,
+          cover_url TEXT,
+          played_at TEXT NOT NULL,
+          song_json TEXT NOT NULL
+        )
+      ''');
+      await db.execute(
+          'CREATE INDEX idx_play_history_played ON play_history(played_at)');
+    }
   }
 
   Future<void> _onCreate(Database db, int version) async {
@@ -144,6 +164,43 @@ class DatabaseService {
   Future<bool> isSongInPlaylist(int playlistId, String songId) async {
     final songs = await getPlaylistSongs(playlistId);
     return songs.any((s) => s.id == songId);
+  }
+
+  // ---------------- Play history ----------------
+
+  Future<int> addHistory(PlayHistoryEntry entry) async {
+    final db = await database;
+    return db.insert('play_history', {
+      'song_id': entry.song.id,
+      'title': entry.song.title,
+      'artist': entry.song.artist,
+      'cover_url': entry.song.artUrl ?? entry.song.thumbnailUrl,
+      'played_at': entry.playedAt.toIso8601String(),
+      'song_json': jsonEncode(entry.song.toJson()),
+    });
+  }
+
+  Future<List<PlayHistoryEntry>> getHistory({int limit = 200}) async {
+    final db = await database;
+    final rows = await db.query(
+      'play_history',
+      orderBy: 'played_at DESC',
+      limit: limit,
+    );
+    return rows
+        .map((r) => PlayHistoryEntry(
+              id: r['id'] as int,
+              song: Song.fromJson(
+                  jsonDecode(r['song_json'] as String) as Map<String, dynamic>),
+              playedAt:
+                  DateTime.parse(r['played_at'] as String),
+            ))
+        .toList();
+  }
+
+  Future<void> clearHistory() async {
+    final db = await database;
+    await db.delete('play_history');
   }
 
   Future<void> removeSongFromPlaylist(int playlistId, String songId) async {

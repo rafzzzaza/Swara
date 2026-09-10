@@ -115,6 +115,38 @@ class MusicApiService {
     return data.map(_songFrom).where((s) => s.previewUrl != null).toList();
   }
 
+  // ---------- Regional hits (Indonesia & Global) ----------
+
+  /// Lagu populer Indonesia dari beberapa query, dideduplikasi by id.
+  Future<List<Song>> indonesiaHits({int limit = 20}) async {
+    return _mergeUnique([
+      await searchSongs('Indonesia top', limit: 14),
+      await searchSongs('Pop Indonesia', limit: 14),
+      await searchSongs('Indonesia hits', limit: 14),
+    ], limit: limit);
+  }
+
+  /// Lagu hits global / barat dari beberapa query, dideduplikasi by id.
+  Future<List<Song>> globalHits({int limit = 20}) async {
+    return _mergeUnique([
+      await searchSongs('top 50 global', limit: 14),
+      await searchSongs('top english pop songs', limit: 14),
+      await searchSongs('best english hits', limit: 14),
+    ], limit: limit);
+  }
+
+  List<Song> _mergeUnique(List<List<Song>> groups, {int limit = 20}) {
+    final seen = <String>{};
+    final out = <Song>[];
+    for (final group in groups) {
+      for (final song in group) {
+        if (seen.add(song.id)) out.add(song);
+        if (out.length >= limit) return out;
+      }
+    }
+    return out;
+  }
+
   // ---------- Album & artist collections ----------
 
   Future<List<Song>> albumTracks(Album album, {int limit = 40}) async {

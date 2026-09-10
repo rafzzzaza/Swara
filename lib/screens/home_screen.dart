@@ -9,12 +9,25 @@ import '../models/genre.dart';
 import '../models/song.dart';
 import '../providers/home_provider.dart';
 import '../providers/player_provider.dart';
+import '../providers/profile_provider.dart';
 import '../widgets/mini_player.dart';
 import '../widgets/shimmer.dart';
 import 'downloads_screen.dart';
 import 'player_screen.dart';
 import 'playlist_screen.dart';
+import 'profile_screen.dart';
 import 'search_screen.dart';
+
+const _avatarIcons = <String, IconData>{
+  'person': Icons.person,
+  'headphones': Icons.headphones,
+  'mic': Icons.mic,
+  'piano': Icons.piano,
+  'album': Icons.album,
+  'star': Icons.star,
+  'bolt': Icons.bolt,
+  'waves': Icons.waves,
+};
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -62,7 +75,12 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             child: NavigationBar(
               selectedIndex: _tab,
-              onDestinationSelected: (i) => setState(() => _tab = i),
+              onDestinationSelected: (i) {
+                setState(() => _tab = i);
+                if (i == 0) {
+                  context.read<HomeProvider>().refreshPersonalized();
+                }
+              },
               destinations: const [
                 NavigationDestination(
                   icon: Icon(Icons.home_outlined),
@@ -176,20 +194,32 @@ class _Header extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final profile = context.watch<ProfileProvider>();
+    final avatarKey = profile.profileOrPlaceholder.avatarKey;
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
       child: Row(
         children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: const BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: LinearGradient(
-                colors: [kSwaraGold, Color(0xFF8A6A1F)],
+          InkWell(
+            borderRadius: BorderRadius.circular(24),
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const ProfileScreen()),
+            ),
+            child: Container(
+              width: 40,
+              height: 40,
+              decoration: const BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: LinearGradient(
+                  colors: [kSwaraGold, Color(0xFF8A6A1F)],
+                ),
+              ),
+              child: Icon(
+                _avatarIcons[avatarKey] ?? _avatarIcons['person'],
+                color: Colors.black,
+                size: 22,
               ),
             ),
-            child: const Icon(Icons.person, color: Colors.black),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -295,19 +325,49 @@ class _HomeContent extends StatelessWidget {
           onTap: onGenre,
         ),
         const SizedBox(height: 20),
-        _QuickGrid(songList: home.trending.take(8).toList()),
+        _QuickGrid(songList: home.personalized.take(8).toList()),
         const SizedBox(height: 22),
+        if (home.personalized.isNotEmpty) ...[
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 16),
+            child: _CarouselTitle('Rekomendasi Untukmu'),
+          ),
+          const SizedBox(height: 4),
+          _TrackCarousel(songs: home.personalized),
+          const SizedBox(height: 22),
+        ],
+        if (home.bySearches.isNotEmpty) ...[
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 16),
+            child: _CarouselTitle('Berdasarkan Musik yang Sering Kamu Cari'),
+          ),
+          const SizedBox(height: 4),
+          _TrackCarousel(songs: home.bySearches),
+          const SizedBox(height: 22),
+        ],
         _CarouselHeader(
           title: 'Top Charts • Trending Saat Ini',
           onSeeAll: () => _openPlaylist(context, home.trending),
         ),
         _TrackCarousel(songs: home.trending),
-        const SizedBox(height: 22),
-        _CarouselHeader(
-          title: 'Rilis Terbaru',
-          onSeeAll: () {},
-        ),
-        _AlbumCarousel(albums: home.newReleases),
+        if (home.indonesia.isNotEmpty) ...[
+          const SizedBox(height: 22),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 16),
+            child: _CarouselTitle('Top Hits Indonesia'),
+          ),
+          const SizedBox(height: 4),
+          _TrackCarousel(songs: home.indonesia),
+        ],
+        if (home.global.isNotEmpty) ...[
+          const SizedBox(height: 22),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 16),
+            child: _CarouselTitle('Top Global Hits'),
+          ),
+          const SizedBox(height: 4),
+          _TrackCarousel(songs: home.global),
+        ],
         const SizedBox(height: 22),
         Row(
           children: [
@@ -327,6 +387,12 @@ class _HomeContent extends StatelessWidget {
         ),
         const SizedBox(height: 4),
         _TrackCarousel(songs: home.recommendations),
+        const SizedBox(height: 22),
+        _CarouselHeader(
+          title: 'Rilis Terbaru',
+          onSeeAll: () {},
+        ),
+        _AlbumCarousel(albums: home.newReleases),
         const SizedBox(height: 22),
         const Padding(
           padding: EdgeInsets.symmetric(horizontal: 16),
@@ -407,7 +473,7 @@ class _QuickGrid extends StatelessWidget {
       children: [
         const Padding(
           padding: EdgeInsets.symmetric(horizontal: 16),
-          child: Text('Populer Untukmu',
+          child: Text('Sering Diputar',
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
         ),
         const SizedBox(height: 10),

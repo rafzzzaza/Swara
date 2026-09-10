@@ -1,19 +1,26 @@
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'providers/download_provider.dart';
+import 'providers/history_provider.dart';
 import 'providers/home_provider.dart';
 import 'providers/player_provider.dart';
 import 'providers/playlist_provider.dart';
+import 'providers/profile_provider.dart';
 import 'providers/search_provider.dart';
 import 'screens/home_screen.dart';
+import 'services/cloud_service.dart';
 import 'services/database_service.dart';
 import 'services/download_service.dart';
+import 'services/history_service.dart';
 import 'services/music_api_service.dart';
+import 'services/recommendation_service.dart';
 import 'services/youtube_audio_service.dart';
 
 const kSwaraGold = Color(0xFFE5A93C);
@@ -41,36 +48,73 @@ Future<void> main() async {
   final api = MusicApiService();
   final database = DatabaseService();
   final youtube = YoutubeAudioService();
+  final prefs = await SharedPreferences.getInstance();
+  final rec = RecommendationService(prefs);
+  final cloud = CloudService();
+  final deviceId = _ensureDeviceId(prefs);
+  final historyService = HistoryService(database, cloud, deviceId);
 
   runApp(SwaraApp(
     api: api,
     database: database,
     youtube: youtube,
+    rec: rec,
+    cloud: cloud,
+    prefs: prefs,
+    deviceId: deviceId,
+    historyService: historyService,
   ));
+}
+
+String _ensureDeviceId(SharedPreferences prefs) {
+  const key = 'swara_device_id';
+  final existing = prefs.getString(key);
+  if (existing != null && existing.isNotEmpty) return existing;
+  final id =
+      'user_${DateTime.now().millisecondsSinceEpoch}_${1000 + math.Random().nextInt(9000)}';
+  prefs.setString(key, id);
+  return id;
 }
 
 class SwaraApp extends StatelessWidget {
   final MusicApiService api;
   final DatabaseService database;
   final YoutubeAudioService youtube;
+  final RecommendationService rec;
+  final CloudService cloud;
+  final SharedPreferences prefs;
+  final String deviceId;
+  final HistoryService historyService;
 
   const SwaraApp({
     super.key,
     required this.api,
     required this.database,
     required this.youtube,
+    required this.rec,
+    required this.cloud,
+    required this.prefs,
+    required this.deviceId,
+    required this.historyService,
   });
 
   @override
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) => PlayerProvider(api, youtube)),
-        ChangeNotifierProvider(create: (_) => HomeProvider(api)),
-        ChangeNotifierProvider(create: (_) => SearchProvider(api)),
+        ChangeNotifierProvider(
+            create: (_) => PlayerProvider(api, youtube, rec, historyService)),
+        ChangeNotifierProvider(create: (_) => HomeProvider(api, rec)),
+        ChangeNotifierProvider(create: (_) => SearchProvider(api, rec)),
         ChangeNotifierProvider(create: (_) => PlaylistProvider(database)),
         ChangeNotifierProvider(
             create: (_) => DownloadProvider(DownloadService(), database)),
+        ChangeNotifierProvider(create: (_) => HistoryProvider(historyService)),
+        ChangeNotifierProvider(
+            create: (_) =>
+                ProfileProvider(prefs, cloud, deviceId: deviceId)..load()),
+        Provider<RecommendationService>.value(value: rec),
+        Provider<CloudService>.value(value: cloud),
       ],
       child: MaterialApp(
         title: 'Swara',

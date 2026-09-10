@@ -7,6 +7,7 @@ class Song {
   final String? thumbnailUrl;
   final String? artUrl;
   final String? previewUrl;
+  final String? genre;
   final bool isLocal;
   final String? localPath;
 
@@ -19,6 +20,7 @@ class Song {
     this.thumbnailUrl,
     this.artUrl,
     this.previewUrl,
+    this.genre,
     this.isLocal = false,
     this.localPath,
   });
@@ -33,6 +35,7 @@ class Song {
     String? thumbnailUrl,
     String? artUrl,
     String? previewUrl,
+    String? genre,
     bool? isLocal,
     String? localPath,
   }) =>
@@ -45,6 +48,7 @@ class Song {
         thumbnailUrl: thumbnailUrl ?? this.thumbnailUrl,
         artUrl: artUrl ?? this.artUrl,
         previewUrl: previewUrl ?? this.previewUrl,
+        genre: genre ?? this.genre,
         isLocal: isLocal ?? this.isLocal,
         localPath: localPath ?? this.localPath,
       );
@@ -58,6 +62,7 @@ class Song {
         'thumbnail': thumbnailUrl,
         'art_url': artUrl,
         'preview': previewUrl,
+        'genre': genre,
         'is_local': isLocal ? 1 : 0,
       };
 
@@ -72,6 +77,7 @@ class Song {
         thumbnailUrl: json['thumbnail'] as String?,
         artUrl: json['art_url'] as String?,
         previewUrl: json['preview'] as String?,
+        genre: json['genre'] as String?,
         isLocal: (json['is_local'] as int? ?? 0) == 1,
       );
 

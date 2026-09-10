@@ -4,9 +4,11 @@ import 'package:flutter/foundation.dart';
 
 import '../models/song.dart';
 import '../services/music_api_service.dart';
+import '../services/recommendation_service.dart';
 
 class SearchProvider extends ChangeNotifier {
   final MusicApiService _api;
+  final RecommendationService _rec;
 
   List<Song> _results = [];
   List<String> _suggestions = [];
@@ -14,7 +16,7 @@ class SearchProvider extends ChangeNotifier {
   String _query = '';
   Timer? _debounce;
 
-  SearchProvider(this._api);
+  SearchProvider(this._api, this._rec);
 
   List<Song> get results => _results;
   List<String> get suggestions => _suggestions;
@@ -36,6 +38,7 @@ class SearchProvider extends ChangeNotifier {
       notifyListeners();
       try {
         _results = await _api.searchSongs(query.trim(), limit: 24);
+        await _rec.recordSearch(query.trim());
       } catch (_) {
         _results = [];
       }
@@ -67,6 +70,7 @@ class SearchProvider extends ChangeNotifier {
     notifyListeners();
     try {
       _results = await _api.searchSongs(query.trim(), limit: 24);
+      await _rec.recordSearch(query.trim());
     } catch (_) {
       _results = [];
     }

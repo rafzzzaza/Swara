@@ -7,9 +7,11 @@ import '../models/artist.dart';
 import '../models/genre.dart';
 import '../models/song.dart';
 import '../services/music_api_service.dart';
+import '../services/recommendation_service.dart';
 
 class HomeProvider extends ChangeNotifier {
   final MusicApiService _api;
+  final RecommendationService _rec;
 
   List<Song> _trending = [];
   List<Album> _newReleases = [];
@@ -19,11 +21,16 @@ class HomeProvider extends ChangeNotifier {
   List<Song> _moodTracks = [];
   List<Song> _defaultRecs = [];
 
+  List<Song> _personalized = [];
+  List<Song> _bySearches = [];
+  List<Song> _indonesia = [];
+  List<Song> _global = [];
+
   bool _loading = true;
   bool _error = false;
   bool _moodLoading = false;
 
-  HomeProvider(this._api);
+  HomeProvider(this._api, this._rec);
 
   List<Song> get trending => _trending;
   List<Album> get newReleases => _newReleases;
@@ -32,6 +39,10 @@ class HomeProvider extends ChangeNotifier {
   List<Artist> get artists => _artists;
   List<Genre> get genres => _genres;
   Genre? get activeGenre => _activeGenre;
+  List<Song> get personalized => _personalized;
+  List<Song> get bySearches => _bySearches;
+  List<Song> get indonesia => _indonesia;
+  List<Song> get global => _global;
   bool get loading => _loading;
   bool get error => _error;
   bool get moodLoading => _moodLoading;
@@ -56,7 +67,88 @@ class HomeProvider extends ChangeNotifier {
       _error = true;
     }
     _loading = false;
+    if (!_error) {
+      await Future.wait([
+        _loadPersonalized(),
+        _loadRegional(),
+      ]);
+    }
     notifyListeners();
+  }
+
+  /// Re-run personalisasi saja (dipanggil tiap Beranda dibuka kembali).
+  Future<void> refreshPersonalized() async {
+    if (_loading) return;
+    await _loadPersonalized();
+    notifyListeners();
+  }
+
+  Future<void> _loadRegional() async {
+    await Future.wait([
+      _safeSearch(() => _api.indonesiaHits(limit: 20), (v) => _indonesia = v),
+      _safeSearch(() => _api.globalHits(limit: 20), (v) => _global = v),
+    ]);
+  }
+
+  Future<void> _loadPersonalized() async {
+    final artists = _rec.topArtists(limit: 3);
+    final genres = _rec.topGenres(limit: 3);
+    final searches = _rec.topSearches(limit: 3);
+    final hasHistory = artists.isNotEmpty || genres.isNotEmpty;
+
+    // Pengguna baru: rekomendasi default = lagu trending umum.
+    if (!hasHistory) {
+      _personalized = _trending.isEmpty ? _defaultRecs : _trending;
+    } else {
+      final groups = <Future<List<Song>>>[
+        for (final a in artists)
+          _safeSearchValue(() => _api.searchSongs('$a top', limit: 10)),
+        for (final g in genres)
+          _safeSearchValue(() => _api.genreTracks(g, limit: 10)),
+      ];
+      final results = List.of(await Future.wait(groups))..removeWhere((l) => l.isEmpty);
+      _personalized = _mergeUnique(results).take(20).toList();
+      if (_personalized.isEmpty) {
+        _personalized = _trending;
+      }
+    }
+
+    if (searches.isEmpty) {
+      _bySearches = [];
+    } else {
+      final groups = [
+        for (final s in searches)
+          _safeSearchValue(() => _api.searchSongs(s, limit: 10)),
+      ];
+      final results = List.of(await Future.wait(groups))..removeWhere((l) => l.isEmpty);
+      _bySearches = _mergeUnique(results).take(20).toList();
+    }
+  }
+
+  Future<void> _safeSearch(Future<List<Song>> Function() task,
+      void Function(List<Song>) setter) async {
+    final v = await _safeSearchValue(task);
+    setter(v);
+  }
+
+  Future<List<Song>> _safeSearchValue(
+      Future<List<Song>> Function() task) async {
+    try {
+      return await task();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  List<Song> _mergeUnique(List<List<Song>> groups) {
+    final seen = <String>{};
+    final out = <Song>[];
+    for (final group in groups) {
+      for (final song in group) {
+        if (seen.add(song.id)) out.add(song);
+      }
+    }
+    return out;
   }
 
   Future<void> _loadGenres() async {
@@ -92,7 +184,10 @@ class HomeProvider extends ChangeNotifier {
     _moodLoading = true;
     notifyListeners();
     try {
-      _moodTracks = await _api.genreTracks(genre.name, limit: 24);
+      final tracks = await _api.genreTracks(genre.name, limit: 24);
+      _moodTracks = [
+        for (final t in tracks) t.copyWith(genre: genre.name),
+      ];
     } catch (_) {
       _moodTracks = [];
     }

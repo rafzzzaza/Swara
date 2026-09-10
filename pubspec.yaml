@@ -47,6 +47,8 @@ dependencies:
   permission_handler: ^13.0.2
   http: ^1.6.0
   palette_generator: ^0.3.3+7
+  shared_preferences: ^2.5.5
+  supabase: ^2.16.1
 
 dev_dependencies:
   flutter_test:
