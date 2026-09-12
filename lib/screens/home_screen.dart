@@ -587,12 +587,12 @@ class _TrackCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Stack(
-              children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(10),
-                  child: AspectRatio(
-                    aspectRatio: 1,
+            Expanded(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(10),
                     child: CachedNetworkImage(
                       imageUrl: song.artUrl ?? song.thumbnailUrl ?? '',
                       fit: BoxFit.cover,
@@ -602,25 +602,25 @@ class _TrackCard extends StatelessWidget {
                           const ColoredBox(color: Color(0xFF242424)),
                     ),
                   ),
-                ),
-                Positioned(
-                  right: 6,
-                  bottom: 6,
-                  child: Container(
-                    width: 34,
-                    height: 34,
-                    decoration: BoxDecoration(
-                      color: kSwaraGold,
-                      shape: BoxShape.circle,
-                      boxShadow: const [
-                        BoxShadow(color: Colors.black45, blurRadius: 6),
-                      ],
+                  Positioned(
+                    right: 6,
+                    bottom: 6,
+                    child: Container(
+                      width: 34,
+                      height: 34,
+                      decoration: BoxDecoration(
+                        color: kSwaraGold,
+                        shape: BoxShape.circle,
+                        boxShadow: const [
+                          BoxShadow(color: Colors.black45, blurRadius: 6),
+                        ],
+                      ),
+                      child: const Icon(Icons.play_arrow,
+                          color: Colors.black, size: 20),
                     ),
-                    child: const Icon(Icons.play_arrow,
-                        color: Colors.black, size: 20),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
             const SizedBox(height: 8),
             Text(
@@ -682,10 +682,9 @@ class _AlbumCarousel extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(10),
-                      child: AspectRatio(
-                        aspectRatio: 1,
+                    Expanded(
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
                         child: CachedNetworkImage(
                           imageUrl:
                               album.pictureUrl ?? album.pictureMedium ?? '',

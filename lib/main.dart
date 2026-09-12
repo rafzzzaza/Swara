@@ -20,6 +20,7 @@ import 'screens/home_screen.dart';
 import 'services/auth_service.dart';
 import 'services/cloud_service.dart';
 import 'services/database_service.dart';
+import 'services/audio_resolver.dart';
 import 'services/download_service.dart';
 import 'services/history_service.dart';
 import 'services/music_api_service.dart';
@@ -54,6 +55,7 @@ Future<void> main() async {
   final api = MusicApiService();
   final database = DatabaseService();
   final youtube = YoutubeAudioService();
+  final resolver = AudioResolver(youtube: youtube);
   final prefs = await SharedPreferences.getInstance();
   final rec = RecommendationService(prefs);
   final cloud = CloudService();
@@ -64,7 +66,7 @@ Future<void> main() async {
   runApp(SwaraApp(
     api: api,
     database: database,
-    youtube: youtube,
+    resolver: resolver,
     rec: rec,
     cloud: cloud,
     prefs: prefs,
@@ -87,7 +89,7 @@ String _ensureDeviceId(SharedPreferences prefs) {
 class SwaraApp extends StatelessWidget {
   final MusicApiService api;
   final DatabaseService database;
-  final YoutubeAudioService youtube;
+  final AudioResolver resolver;
   final RecommendationService rec;
   final CloudService cloud;
   final SharedPreferences prefs;
@@ -99,7 +101,7 @@ class SwaraApp extends StatelessWidget {
     super.key,
     required this.api,
     required this.database,
-    required this.youtube,
+    required this.resolver,
     required this.rec,
     required this.cloud,
     required this.prefs,
@@ -114,12 +116,12 @@ class SwaraApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider<AuthProvider>.value(value: authProvider),
         ChangeNotifierProvider(
-            create: (_) => PlayerProvider(api, youtube, rec, historyService)),
+            create: (_) => PlayerProvider(api, resolver, rec, historyService)),
         ChangeNotifierProvider(create: (_) => HomeProvider(api, rec)),
         ChangeNotifierProvider(create: (_) => SearchProvider(api, rec)),
         ChangeNotifierProvider(create: (_) => PlaylistProvider(database)),
         ChangeNotifierProvider(
-            create: (_) => DownloadProvider(DownloadService(), database)),
+            create: (_) => DownloadProvider(DownloadService(resolver), database)),
         ChangeNotifierProvider(create: (_) => HistoryProvider(historyService)),
         ChangeNotifierProvider(
             create: (_) =>

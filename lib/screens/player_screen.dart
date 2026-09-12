@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:cached_network_image/cached_network_image.dart';
@@ -20,6 +21,23 @@ class PlayerScreen extends StatefulWidget {
 
 class _PlayerScreenState extends State<PlayerScreen> {
   double _volume = 1.0;
+  StreamSubscription<String>? _errorSub;
+
+  @override
+  void initState() {
+    super.initState();
+    _errorSub = context.read<PlayerProvider>().errorStream.listen((message) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(message)));
+    });
+  }
+
+  @override
+  void dispose() {
+    _errorSub?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -118,6 +136,28 @@ class _PlayerScreenState extends State<PlayerScreen> {
               ],
             ),
           ),
+          if (player.isPreparing)
+            Positioned.fill(
+              child: Container(
+                color: Colors.black.withValues(alpha: 0.45),
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const CircularProgressIndicator(color: Colors.white),
+                      const SizedBox(height: 14),
+                      Text(
+                        'Mencari aliran YouTube…',
+                        style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.white.withValues(alpha: 0.9)),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -589,51 +629,34 @@ class _NowPlayingPanelState extends State<_NowPlayingPanel>
           ),
           const SizedBox(width: 14),
           Expanded(
-            child: StreamBuilder<Duration?>(
-              stream: widget.player.durationStream,
-              builder: (context, snap) {
-                final full = (snap.data ?? Duration.zero).inSeconds >= 60;
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
                   children: [
-                    AnimatedSwitcher(
-                      duration: const Duration(milliseconds: 300),
-                      child: Row(
-                        key: ValueKey(full),
-                        children: [
-                          Icon(
-                            full ? Icons.play_circle_outline : Icons.graphic_eq,
-                            size: 14,
-                            color: Colors.white.withValues(alpha: 0.7),
-                          ),
-                          const SizedBox(width: 6),
-                          Flexible(
-                            child: Text(
-                              full
-                                  ? 'Full audio · Aliran YouTube'
-                                  : 'Preview 30 detik · Deezer',
-                              style: TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
-                                  color: Colors.white.withValues(alpha: 0.75)),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ],
+                    const Icon(Icons.play_circle_outline,
+                        size: 14, color: Colors.white70),
+                    const SizedBox(width: 6),
+                    Flexible(
+                      child: Text(
+                        'Full audio · Aliran YouTube',
+                        style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.white.withValues(alpha: 0.75)),
+                        overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                    const SizedBox(height: 4),
-                    Text(
-                      full
-                          ? 'Memutar versi lengkap lagu tanpa potongan.'
-                          : 'Full audio tidak ditemukan, memutar cuplikan.',
-                      style: TextStyle(
-                          fontSize: 10.5,
-                          color: Colors.white.withValues(alpha: 0.45)),
-                    ),
                   ],
-                );
-              },
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Memutar versi lengkap lagu tanpa potongan.',
+                  style: TextStyle(
+                      fontSize: 10.5,
+                      color: Colors.white.withValues(alpha: 0.45)),
+                ),
+              ],
             ),
           ),
         ],

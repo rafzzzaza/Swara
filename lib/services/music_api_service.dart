@@ -63,7 +63,7 @@ class MusicApiService {
     });
     final data = ((j['tracks']?['data'] as List?) ?? [])
         .cast<Map<String, dynamic>>();
-    return data.map(_songFrom).where((s) => s.previewUrl != null).toList();
+    return data.map(_songFrom).toList();
   }
 
   Future<List<Album>> newAlbums({int limit = 20}) async {
@@ -112,7 +112,7 @@ class MusicApiService {
       'order': ?order,
     });
     final data = (j['data'] as List).cast<Map<String, dynamic>>();
-    return data.map(_songFrom).where((s) => s.previewUrl != null).toList();
+    return data.map(_songFrom).toList();
   }
 
   // ---------- Regional hits (Indonesia & Global) ----------
@@ -170,7 +170,7 @@ class MusicApiService {
         artUrl: coverXl ?? coverBig ?? coverMedium,
         previewUrl: s.previewUrl,
       );
-    }).where((s) => s.previewUrl != null).toList();
+    }).toList();
   }
 
   Future<List<Song>> artistTracks(Artist artist, {int limit = 15}) async {
@@ -191,7 +191,6 @@ class MusicApiService {
             previewUrl: s.previewUrl,
           );
         })
-        .where((s) => s.previewUrl != null)
         .toList();
   }
 

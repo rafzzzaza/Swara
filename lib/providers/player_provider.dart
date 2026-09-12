@@ -5,16 +5,18 @@ import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 
 import '../models/song.dart';
+import '../services/audio_pipe_service.dart';
+import '../services/audio_resolver.dart';
 import '../services/history_service.dart';
 import '../services/music_api_service.dart';
 import '../services/recommendation_service.dart';
-import '../services/youtube_audio_service.dart';
 
 class PlayerProvider extends ChangeNotifier {
   final MusicApiService _api;
-  final YoutubeAudioService _yt;
+  final AudioResolver _resolver;
   final RecommendationService _rec;
   final HistoryService _history;
+  final AudioPipeService _pipe;
 
   late final AudioPlayer _player;
 
@@ -27,18 +29,76 @@ class PlayerProvider extends ChangeNotifier {
   bool _recommendationsLoading = false;
   bool _fetchingRecs = false;
   bool _appendingRecs = false;
+  bool _preparing = false;
+  bool _handlingError = false;
 
   bool _autoQueue = false;
 
-  /// Berapa sumber audio YouTube yang boleh di-resolve bersamaan.
+  /// Sumber cadangan per lagu (URL stream alternatif) — dipakai saat URL
+  /// utama kena 403 / mati agar antrean tidak berhenti.
+  final Map<String, List<String>> _altsBySongId = {};
+
+  /// Hitung berapa kali lagu restart gara-gara stream terputus. Kalau sudah
+  /// 2× tapi masih macet (biasanya karena dinding 1 MiB googlevideo), skip
+  /// ke lagu berikutnya supaya tidak restart-loops selamanya.
+  final Map<String, int> _restartsBySong = {};
+
+  final StreamController<String> _errors = StreamController.broadcast();
+  Stream<String> get errorStream => _errors.stream;
+  bool get isPreparing => _preparing;
+
+  /// Watchdog anti-stream-buntung: ExoPlayer kadang tidak mengeluarkan
+  /// error saat HTTP 403 membekukan playhead (state tetap PLAYING). Bila
+  /// posisi tidak bergerak selama ~10 detik padahal statusnya playing,
+  /// force `_handlePlaybackError()` supaya fallback berlapis berjalan.
+  Timer? _watch;
+  Duration _lastPos = Duration.zero;
+  int _frozenTicks = 0;
+
+  void _watchStall(Timer _) {
+    if (_handlingError || _preparing || !_player.playing || _queue.isEmpty) {
+      return;
+    }
+    try {
+      final pos = _player.position;
+      final started = pos > const Duration(milliseconds: 700);
+      final moved = pos - _lastPos;
+      if (started &&
+          _lastPos > Duration.zero &&
+          moved < const Duration(milliseconds: 700)) {
+        _frozenTicks++;
+      } else {
+        _frozenTicks = 0;
+        final s = currentSong;
+        if (s != null) _restartsBySong.remove(s.id);
+      }
+      _lastPos = pos;
+      if (_frozenTicks >= 5) {
+        _frozenTicks = 0;
+        // ignore: avoid_print
+        debugPrint('YT: playhead beku di $pos -> tangani error stream');
+        unawaited(_handlePlaybackError());
+      }
+    } catch (_) {
+      _frozenTicks = 0;
+    }
+  }
+
+  /// Berapa stream YouTube yang boleh di-resolve bersamaan.
   /// Concurrency terbatas mencegah lonjakan request yang bikin lag.
-  static const _satelliteConcurrency = 3;
+  static const _resolveConcurrency = 4;
 
   static const _userAgent =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-  PlayerProvider(this._api, this._yt, this._rec, this._history) {
+  PlayerProvider(
+    this._api,
+    this._resolver,
+    this._rec,
+    this._history, {
+    AudioPipeService? pipe,
+  })  : _pipe = pipe ?? AudioPipeService() {
     _player = AudioPlayer();
 
     _player.currentIndexStream.listen((index) {
@@ -63,6 +123,14 @@ class PlayerProvider extends ChangeNotifier {
         }
       }
     });
+
+    _player.errorStream.listen((e) {
+      // ignore: avoid_print
+      debugPrint('YT: errorStream $e');
+      unawaited(_handlePlaybackError());
+    });
+
+    _watch = Timer.periodic(const Duration(seconds: 2), _watchStall);
   }
 
   AudioPlayer get audioPlayer => _player;
@@ -96,18 +164,20 @@ class PlayerProvider extends ChangeNotifier {
   LoopMode get loopMode => _player.loopMode;
   double get volume => _player.volume;
 
-  /// Jalankan [tasks] dengan maksimal [concurrency] task paralel.
-  Future<void> _runWithConcurrency(
+  /// Resolve [count] item secara paralel (maks [concurrency]) dan kembalikan
+  /// hasil per indeks. Item yang gagal bernilai null.
+  Future<List<T?>> _collectConcurrency<T>(
     int count,
     int concurrency,
-    Future<void> Function(int i) task,
+    Future<T?> Function(int i) resolve,
   ) async {
+    final results = List<T?>.filled(count, null);
     var next = 0;
     Future<void> worker() async {
       while (true) {
         final i = next++;
         if (i >= count) return;
-        await task(i);
+        results[i] = await resolve(i);
       }
     }
 
@@ -115,13 +185,15 @@ class PlayerProvider extends ChangeNotifier {
       for (var w = 0; w < concurrency && w < count; w++) worker(),
     ];
     await Future.wait(workers);
+    return results;
   }
 
   /// Builds the audio source for [song].
   ///
-  /// Priority: local file (full) -> full-length YouTube stream -> Deezer
-  /// 30s preview. [cachedOnly] makes the YouTube lookup non-blocking by
-  /// only consulting the in-memory resolution cache.
+  /// Sumber audio PENUH: file lokal -> stream full-length YouTube.
+  /// Deezer preview TIDAK dipakai lagi (API Deezer permanen 30 detik).
+  /// [cachedOnly] membatasi pencarian YouTube hanya ke cache in-memory
+  /// (cepat, non-blokir) — tetap tidak pernah memakai preview.
   Future<AudioSource?> _sourceFor(Song song, {bool cachedOnly = false}) async {
     final mediaItem = _toMediaItem(song);
 
@@ -129,85 +201,86 @@ class PlayerProvider extends ChangeNotifier {
       return AudioSource.uri(Uri.file(song.localPath!), tag: mediaItem);
     }
 
-    final ytUrl = await _yt.resolve(song, cachedOnly: cachedOnly);
-    if (ytUrl != null) {
-      return AudioSource.uri(
-        Uri.parse(ytUrl),
-        tag: mediaItem,
-        headers: const {
-          'User-Agent': _userAgent,
-          'Accept-Language': 'en-US,en;q=0.9',
-        },
-      );
+    final ytUrls = await _resolver.resolve(song, cachedOnly: cachedOnly);
+    if (ytUrls.isEmpty) return null;
+    final uri = await _pipe.wrap(ytUrls.first);
+    _pipe.sessionCookie = _resolver.sessionCookie;
+    if (ytUrls.length > 1) {
+      _altsBySongId[song.id] = ytUrls.sublist(1);
     }
-
-    final uri = Uri.tryParse(song.previewUrl ?? '');
-    if (uri == null || !uri.hasScheme) return null;
-    return AudioSource.uri(uri, tag: mediaItem);
+    return AudioSource.uri(
+      uri,
+      tag: mediaItem,
+      headers: const {
+        'User-Agent': _userAgent,
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    );
   }
 
   Future<void> playQueue(List<Song> songs, {int index = 0}) async {
     if (songs.isEmpty) return;
     notifyListeners();
 
-    // 1) Lagu yang di-tap di-resolve penuh dulu (langsung muter full).
-    final primarySource = await _sourceFor(songs[index]);
-    if (primarySource == null) {
-      notifyListeners();
-      return;
-    }
-
-    // 2) Sisa queue di-resolve dari cache (cepat) agar build tidak nge-blok.
-    final satIdx = <int>[];
-    for (var i = 0; i < songs.length; i++) {
-      if (i != index) satIdx.add(i);
-    }
-    final satFutures = <Future<AudioSource?>>[
-      for (final i in satIdx) _sourceFor(songs[i], cachedOnly: true),
-    ];
-    final satResults = await Future.wait(satFutures);
-
-    // 3) Rakit ulang urutan asli.
-    final children = <AudioSource>[];
-    final resolvedSongs = <Song>[];
-    var satK = 0;
-    for (var i = 0; i < songs.length; i++) {
-      AudioSource? src;
-      if (i == index) {
-        src = primarySource;
-      } else {
-        src = satResults[satK++];
-      }
-      if (src == null) continue;
-      resolvedSongs.add(songs[i]);
-      children.add(src);
-      if (i == index) index = resolvedSongs.length - 1;
-    }
-    if (children.isEmpty) {
-      notifyListeners();
-      return;
-    }
-
-    _queue = List.of(resolvedSongs);
-    _children = children;
-    index = index.clamp(0, _queue.length - 1);
+    // 1) Lagu yang di-tap di-resolve PENUH dulu (blocking ~1-3 detik).
+    //    Cari stream full-length YouTube "Judul + Artis" lalu putar lewat
+    //    just_audio. Tidak ada fallback preview 30 detik.
     final gen = ++_generation;
+    final desired = List<Song>.of(songs);
+    _preparing = true;
+    notifyListeners();
+    final primary = await _sourceFor(desired[index]);
+    if (primary == null) {
+      _preparing = false;
+      _errors.add(
+          'Audio penuh tidak ditemukan untuk "${desired[index].title}".');
+      notifyListeners();
+      return;
+    }
 
+    // 2) Putar lagu pertama segera (full audio).
+    _queue = [desired[index]];
+    _children = [primary];
     try {
       await _player.stop();
-      await _player.setAudioSources(_children, initialIndex: index);
-      _currentIndex = index;
+      await _player.setAudioSources(_children, initialIndex: 0);
+      _currentIndex = 0;
       await _player.play();
     } catch (_) {}
+    _preparing = false;
     notifyListeners();
 
-    _recordActivity(resolvedSongs[index]);
+    _recordActivity(desired[index]);
     unawaited(loadRecommendations());
     if (_autoQueue) _maybeAutoAppend();
 
-    // 4) Upgrade seluruh queue ke full-length YouTube di background,
-    //    tanpa memblokir pemutaran.
-    unawaited(_upgradeQueueFull(gen, _queue.length));
+    // 3) Sisa antrean di-resolve penuh di background, lalu disisipkan
+    //    berurutan tanpa menghentikan lagu yang sedang diputar.
+    unawaited(_fillQueueRest(gen, desired));
+  }
+
+  /// Resolve & masukkan sisa [desired] (setelah lagu pertama) ke antrean.
+  Future<void> _fillQueueRest(int gen, List<Song> desired) async {
+    if (desired.length <= 1) return;
+    final count = desired.length - 1;
+    final srcs = await _collectConcurrency<AudioSource?>(
+      count,
+      _resolveConcurrency,
+      (k) => _sourceFor(desired[k + 1]),
+    );
+    if (gen != _generation || _queue.isEmpty) return;
+
+    final newQueue = <Song>[_queue.first];
+    final newChildren = <AudioSource>[_children.first];
+    for (var k = 0; k < count; k++) {
+      final src = srcs[k];
+      if (src == null) continue;
+      newQueue.add(desired[k + 1]);
+      newChildren.add(src);
+    }
+    _queue = newQueue;
+    _children = newChildren;
+    await _applyChildrenSwap();
   }
 
   /// Mencatat aktivitas pemutaran lokal (rekomendasi + riwayat).
@@ -218,26 +291,107 @@ class PlayerProvider extends ChangeNotifier {
     } catch (_) {}
   }
 
-  /// Upgrade semua indeks queue menjadi full-length (bukan preview 30 detik).
-  Future<void> _upgradeQueueFull(int gen, int length) async {
-    await _runWithConcurrency(length, _satelliteConcurrency, (i) async {
-      await _upgradeIndex(gen, i);
-    });
+  /// Menerapkan daftar sumber ke player tanpa menginterupsi lagu yang
+  /// sedang diputar (posisi & status dipilih kembali).
+  Future<void> _applyChildrenSwap() async {
+    if (_children.isEmpty) return;
+    final ci = (_currentIndex ?? 0).clamp(0, _children.length - 1);
+    final wasPlaying = _player.playing;
+    final pos = _player.position;
+    try {
+      await _player.setAudioSources(_children, initialIndex: ci);
+      await _player.seek(pos);
+      if (wasPlaying && !_player.playing) {
+        await _player.play();
+      }
+    } catch (_) {}
   }
 
-  Future<void> _upgradeIndex(int gen, int i) async {
-    if (i < 0 || i >= _queue.length || i >= _children.length) return;
-    final song = _queue[i];
-    if (song.isLocal && song.localPath != null) return;
-    final full = await _sourceFor(song);
-    if (full == null) return;
-    if (gen != _generation) return;
-    if (i >= _children.length || identical(_children[i], full)) return;
-    _children[i] = full;
+  /// Dipanggil saat stream yang sedang diputar error (403/timeout/expired).
+  /// Urutan: URL cadangan -> resolve ulang -> skip ke lagu berikutnya.
+  Future<void> _handlePlaybackError() async {
+    if (_handlingError) return;
+    final ci = _currentIndex;
+    if (ci == null || ci < 0 || ci >= _queue.length) return;
+    final song = _queue[ci];
+    _handlingError = true;
     try {
-      final ci = (_currentIndex ?? 0).clamp(0, _children.length - 1);
-      await _player.setAudioSources(_children, initialIndex: ci);
+      final alts = _altsBySongId[song.id];
+      if (alts != null && alts.isNotEmpty) {
+        final url = alts.removeAt(0);
+        // ignore: avoid_print
+        debugPrint('YT: stream utama gagal, coba URL cadangan "${song.title}"');
+        await _swapSourceAt(ci, url, song);
+        await _player.play();
+        return;
+      }
+
+      // Semua cadangan habis: invalidate cache & resolve ulang sekali.
+      // Maksimal 2× restart; kalau masih macet (dinding 1 MiB), skip.
+      _resolver.invalidate(song);
+      final fresh = await _resolver.resolve(song);
+      if (fresh.isNotEmpty) {
+        final restarts = (_restartsBySong[song.id] ?? 0) + 1;
+        _restartsBySong[song.id] = restarts;
+        if (restarts < 3) {
+          _altsBySongId[song.id] = fresh.sublist(1);
+          // ignore: avoid_print
+          debugPrint('YT: resolve ulang "${song.title}" restart#=$restarts');
+          await _swapSourceAt(ci, fresh.first, song);
+          await _player.play();
+          return;
+        }
+      }
+
+      _errors.add('Gagal memuat audio "${song.title}".');
+      if (ci + 1 < _children.length) {
+        await _player.seek(Duration.zero, index: ci + 1);
+        await _player.play();
+      } else {
+        await _player.stop();
+      }
+    } catch (_) {} finally {
+      _handlingError = false;
+    }
+  }
+
+  /// Ganti sumber pada [index] dengan URL stream baru, tanpa menghentikan
+  /// antrean (posisi & status dipilih kembali oleh [_applyChildrenSwap]).
+  Future<void> _swapSourceAt(int index, String ytUrl, Song song) async {
+    final mediaItem = _toMediaItem(song);
+    final uri = await _pipe.wrap(ytUrl);
+    final src = AudioSource.uri(
+      uri,
+      tag: mediaItem,
+      headers: const {
+        'User-Agent': _userAgent,
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    );
+    if (index >= 0 && index < _children.length) {
+      _children[index] = src;
+    } else {
+      _children = [src];
+    }
+    await _applyChildrenSwap();
+  }
+
+  Future<void> _playLocal(Song song) async {
+    if (song.localPath == null) return;
+    await _player.stop();
+    try {
+      final src = AudioSource.uri(
+        Uri.file(song.localPath!),
+        tag: _toMediaItem(song),
+      );
+      _children = [src];
+      await _player.setAudioSource(src);
+      _queue = [song];
+      _currentIndex = 0;
+      await _player.play();
     } catch (_) {}
+    notifyListeners();
+    unawaited(_recordActivity(song));
   }
 
   Future<void> playSong(Song song) async {
@@ -262,31 +416,13 @@ class PlayerProvider extends ChangeNotifier {
     await playQueue([song], index: 0);
   }
 
-  Future<void> _playLocal(Song song) async {
-    if (song.localPath == null) return;
-    await _player.stop();
-    try {
-      final src = AudioSource.uri(
-        Uri.file(song.localPath!),
-        tag: _toMediaItem(song),
-      );
-      _children = [src];
-      await _player.setAudioSource(src);
-      _queue = [song];
-      _currentIndex = 0;
-      await _player.play();
-    } catch (_) {}
-    notifyListeners();
-    unawaited(_recordActivity(song));
-  }
-
   Future<void> insertNext(Song song) async {
     if (_queue.isEmpty) {
       await playQueue([song], index: 0);
       return;
     }
-    final gen = ++_generation;
-    final source = await _sourceFor(song, cachedOnly: true);
+    ++_generation;
+    final source = await _sourceFor(song);
     if (source == null) return;
     final insertAt = (_currentIndex ?? 0).clamp(0, _queue.length);
     try {
@@ -297,7 +433,6 @@ class PlayerProvider extends ChangeNotifier {
       return;
     }
     notifyListeners();
-    unawaited(_upgradeIndex(gen, insertAt + 1));
   }
 
   Future<void> addToQueue(Song song) async {
@@ -305,8 +440,8 @@ class PlayerProvider extends ChangeNotifier {
       await playQueue([song], index: 0);
       return;
     }
-    final gen = ++_generation;
-    final source = await _sourceFor(song, cachedOnly: true);
+    ++_generation;
+    final source = await _sourceFor(song);
     if (source == null) return;
     try {
       await _player.addAudioSources([source]);
@@ -316,7 +451,6 @@ class PlayerProvider extends ChangeNotifier {
       return;
     }
     notifyListeners();
-    unawaited(_upgradeIndex(gen, _children.length - 1));
   }
 
   Future<void> skipTo(int index) async {
@@ -373,24 +507,25 @@ class PlayerProvider extends ChangeNotifier {
           _recommendations.where((s) => !used.contains(s.id)).take(8).toList();
       if (pick.isNotEmpty) {
         final gen = ++_generation;
+        final srcs = await _collectConcurrency<AudioSource?>(
+          pick.length,
+          _resolveConcurrency,
+          (k) => _sourceFor(pick[k]),
+        );
+        if (gen != _generation || _queue.isEmpty) return;
+        final songs = <Song>[];
         final sources = <AudioSource>[];
-        for (final s in pick) {
-          final src = await _sourceFor(s, cachedOnly: true);
-          if (src != null) sources.add(src);
+        for (var k = 0; k < pick.length; k++) {
+          final src = srcs[k];
+          if (src == null) continue;
+          songs.add(pick[k]);
+          sources.add(src);
         }
         if (sources.isNotEmpty) {
           await _player.addAudioSources(sources);
           _children.addAll(sources);
-          _queue.addAll(pick);
+          _queue.addAll(songs);
           notifyListeners();
-          unawaited(_runWithConcurrency(
-            sources.length,
-            _satelliteConcurrency,
-            (k) async {
-              final i = _children.length - sources.length + k;
-              await _upgradeIndex(gen, i);
-            },
-          ));
         }
       }
     } catch (_) {}
@@ -490,8 +625,11 @@ class PlayerProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _watch?.cancel();
     _player.dispose();
-    _yt.dispose();
+    _resolver.dispose();
+    _pipe.dispose();
+    _errors.close();
     super.dispose();
   }
 }

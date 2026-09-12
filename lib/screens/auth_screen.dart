@@ -201,15 +201,22 @@ class _Brand extends StatelessWidget {
         Container(
           width: 88,
           height: 88,
-          decoration: const BoxDecoration(
+          decoration: BoxDecoration(
             shape: BoxShape.circle,
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [kSwaraGold, Color(0xFF8A6A1F)],
+            color: Colors.white.withValues(alpha: 0.06),
+            border: Border.all(color: kSwaraGold.withValues(alpha: 0.4)),
+          ),
+          child: ClipOval(
+            child: Image.asset(
+              'assets/images/logo.png',
+              fit: BoxFit.cover,
+              errorBuilder: (_, _, _) => const Icon(
+                Icons.graphic_eq,
+                color: Colors.black,
+                size: 44,
+              ),
             ),
           ),
-          child: const Icon(Icons.graphic_eq, color: Colors.black, size: 44),
         ),
         const SizedBox(height: 16),
         const Text('Swara',
